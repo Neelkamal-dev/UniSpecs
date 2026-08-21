@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#15803D" />
+      <stop offset="100%" stop-color="#052E16" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000000" flood-opacity="0.2"/>
+    </filter>
+  </defs>
+  
+  <!-- Rounded Base Badge -->
+  <rect width="32" height="32" rx="7" fill="url(#brandGrad)"/>
+  
+  <!-- Modern Geometric 'U' / Specification Spec Nodes -->
+  <g filter="url(#glow)">
+    <!-- Main U curve -->
+    <path d="M9 8.5 V17.5 C9 21.366 12.134 24.5 16 24.5 C19.866 24.5 23 21.366 23 17.5 V8.5" 
+          stroke="#FFFFFF" 
+          stroke-width="2.75" 
+          stroke-linecap="round"/>
+    
+    <!-- Central Intelligence / Verified Core Point -->
+    <circle cx="16" cy="16.5" r="2.25" fill="#4ADE80"/>
+    
+    <!-- Precision Crossbar / Spec Alignment Accent -->
+    <path d="M11 12.5 H21" stroke="#86EFAC" stroke-width="1.75" stroke-linecap="round" stroke-dasharray="0.1 3"/>
+  </g>
+</svg>
