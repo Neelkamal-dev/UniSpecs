@@ -2,6 +2,14 @@
 
 > **Unified, Verified Product Specifications**
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Vercel-black?style=for-the-badge&logo=vercel)](https://unispecs.vercel.app)
+[![API Service](https://img.shields.io/badge/API%20Service-Render-46E3B7?style=for-the-badge&logo=render)](https://unispecs.onrender.com)
+[![API Docs](https://img.shields.io/badge/API%20Docs-FastAPI-009688?style=for-the-badge&logo=fastapi)](https://unispecs.onrender.com/docs)
+
+- **Live Web App**: [https://unispecs.vercel.app](https://unispecs.vercel.app)
+- **Live Backend API**: [https://unispecs.onrender.com](https://unispecs.onrender.com)
+- **Interactive Swagger Docs**: [https://unispecs.onrender.com/docs](https://unispecs.onrender.com/docs)
+
 UniSpecs transforms fragmented product information into **structured, evidence-backed, validated and explainable product intelligence**.
 The platform never behaves like a generic chatbot — it discovers authoritative sources, extracts specifications, normalizes technical units, performs cross-source validation, detects and resolves conflicts, calculates transparent confidence scores, preserves source evidence, and exports structured dataset results.
 
