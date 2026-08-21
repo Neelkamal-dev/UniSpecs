@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # Provider Keys
     GEMINI_API_KEY: str = ""
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "groq/compound"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
     TAVILY_API_KEY: str = ""
     
     # File Storage

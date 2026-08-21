@@ -24,8 +24,15 @@ export interface ProductIdentity {
   sku?: string;
   category?: string;
   variant?: string;
+  image_url?: string;
   identity_confidence: number;
   identity_status: 'VERIFIED' | 'NEEDS_REVIEW' | 'UNVERIFIED';
+  possible_matches?: Array<{
+    brand?: string;
+    product_name: string;
+    model?: string;
+    mpn?: string;
+  }>;
 }
 
 export interface NormalizedValue {

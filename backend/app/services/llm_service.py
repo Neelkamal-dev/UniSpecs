@@ -24,8 +24,7 @@ class LLMService:
     async def _call_for_identification(self, prompt: str) -> str:
         """
         Agent 1 Product Identification Task:
-        Uses Groq LPU for ultra-fast (< 300ms) identity classification.
-        Falls back to Gemini if Groq is not configured or fails.
+        Uses fast Groq LPU inference. Falls back to Gemini if Groq fails.
         """
         if self.has_groq:
             try:
@@ -41,17 +40,16 @@ class LLMService:
     async def _call_for_document_extraction(self, prompt: str) -> str:
         """
         Agent 2 Evidence Research & Attribute Extraction Task:
-        Uses Gemini (Gemini 3.6 Flash) for large context window (30k+ chars) & deep evidence reasoning.
-        Falls back to Groq if Gemini is not configured or fails.
+        Uses fast Groq inference first for low latency, falling back to Gemini.
         """
-        if self.has_gemini:
-            try:
-                return await self._call_gemini(prompt)
-            except Exception as e:
-                logger.warning(f"Gemini call for document extraction failed: {e}. Falling back to Groq...")
-
         if self.has_groq:
-            return await self._call_groq(prompt)
+            try:
+                return await self._call_groq(prompt)
+            except Exception as e:
+                logger.warning(f"Groq call for document extraction failed: {e}. Falling back to Gemini...")
+
+        if self.has_gemini:
+            return await self._call_gemini(prompt)
 
         raise ValueError("No LLM API keys configured for document extraction.")
 
@@ -74,7 +72,7 @@ class LLMService:
 
     async def _call_groq(self, prompt: str) -> str:
         """
-        Ultra-fast Groq LPU inference call via OpenAI-compatible endpoint.
+        Ultra-fast Groq LPU inference call with model fallback.
         """
         import httpx
         url = "https://api.groq.com/openai/v1/chat/completions"
@@ -82,34 +80,64 @@ class LLMService:
             "Authorization": f"Bearer {self.groq_key}",
             "Content-Type": "application/json"
         }
-        payload = {
-            "model": self.groq_model,
-            "messages": [
-                {"role": "system", "content": "You are a precise technical product intelligence assistant. Always output strict JSON format when requested."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"}
-        }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["choices"][0]["message"]["content"]
-            else:
-                raise RuntimeError(f"Groq API error HTTP {resp.status_code}: {resp.text}")
+        models_to_try = [self.groq_model or "openai/gpt-oss-120b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
+        seen_models = set()
+
+        last_err = None
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            for model_name in models_to_try:
+                if not model_name or model_name in seen_models:
+                    continue
+                seen_models.add(model_name)
+                payload = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": "You are a precise technical product intelligence assistant. You must always output a valid JSON object."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.1,
+                    "response_format": {"type": "json_object"}
+                }
+                try:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        return data["choices"][0]["message"]["content"]
+                    else:
+                        last_err = RuntimeError(f"Groq API error with model {model_name} HTTP {resp.status_code}: {resp.text[:150]}")
+                except Exception as ex:
+                    last_err = ex
+                    continue
+
+        raise last_err or RuntimeError("All Groq model attempts failed.")
 
     async def _call_gemini(self, prompt: str) -> str:
         """
-        Internal caller for Gemini API.
+        Non-blocking async caller for Gemini API with model fallback.
         """
-        from google import genai
-        client = genai.Client(api_key=self.gemini_key)
-        response = client.models.generate_content(
-            model='gemini-3.6-flash',
-            contents=prompt,
-        )
-        return response.text or ""
+        import asyncio
+
+        def _sync_gemini_call():
+            from google import genai
+            client = genai.Client(api_key=self.gemini_key)
+            for m in ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']:
+                try:
+                    response = client.models.generate_content(
+                        model=m,
+                        contents=prompt,
+                    )
+                    return response.text or ""
+                except Exception as ex:
+                    if "429" in str(ex) or "RESOURCE_EXHAUSTED" in str(ex):
+                        continue
+                    raise ex
+            return ""
+
+        try:
+            return await asyncio.to_thread(_sync_gemini_call)
+        except Exception as e:
+            logger.warning(f"Gemini call error: {e}")
+            raise e
 
     async def identify_product(
         self,
@@ -136,7 +164,7 @@ Inputs:
 
 Rules:
 1. Prioritize: Exact Model/MPN > Manufacturer > Product Name > Variant > Category.
-2. If multiple products could match or input is ambiguous, set identity_status to "NEEDS_REVIEW".
+2. If multiple products could match, the input is vague (e.g. "Samsung phone"), or the input is ambiguous, set identity_status to "NEEDS_REVIEW", identity_confidence to a value below 0.8, and return a list of 2-3 possible matches.
 3. Return strict JSON matching this structure ONLY:
 {{
   "brand": "Manufacturer Name or null",
@@ -146,7 +174,33 @@ Rules:
   "category": "Category or null",
   "variant": "Variant/Region or null",
   "identity_confidence": 0.98,
-  "identity_status": "VERIFIED"
+  "identity_status": "VERIFIED",
+  "possible_matches": null
+}}
+OR (if ambiguous/vague):
+{{
+  "brand": null,
+  "product_name": "Ambiguous Product",
+  "model": null,
+  "mpn": null,
+  "category": "Electronics or similar",
+  "variant": null,
+  "identity_confidence": 0.40,
+  "identity_status": "NEEDS_REVIEW",
+  "possible_matches": [
+    {{
+      "brand": "Brand A",
+      "product_name": "Product A",
+      "model": "Model A",
+      "mpn": "MPN A"
+    }},
+    {{
+      "brand": "Brand B",
+      "product_name": "Product B",
+      "model": "Model B",
+      "mpn": "MPN B"
+    }}
+  ]
 }}
 """
             try:
@@ -160,6 +214,47 @@ Rules:
         # Fallback / Local Rule-Based Identification logic when key absent or call fails
         pname = name or "Product"
         m_num = model or mpn
+
+        # Check for ambiguous/generic queries in fallback mode
+        possible_matches = None
+        identity_status = "VERIFIED"
+        identity_confidence = 0.90
+        
+        pname_lower = pname.lower()
+        if ("samsung" in pname_lower or "galaxy" in pname_lower or "phone" in pname_lower) and not m_num:
+            identity_status = "NEEDS_REVIEW"
+            identity_confidence = 0.50
+            possible_matches = [
+                {
+                    "brand": "Samsung",
+                    "product_name": "Samsung Galaxy S24",
+                    "model": "SM-S921B",
+                    "mpn": "SM-S921B"
+                },
+                {
+                    "brand": "Samsung",
+                    "product_name": "Samsung Galaxy S24 Ultra",
+                    "model": "SM-S928B",
+                    "mpn": "SM-S928B"
+                }
+            ]
+        elif ("grinding" in pname_lower or "wheel" in pname_lower or "milwaukee" in pname_lower) and not m_num:
+            identity_status = "NEEDS_REVIEW"
+            identity_confidence = 0.50
+            possible_matches = [
+                {
+                    "brand": "Milwaukee",
+                    "product_name": "Milwaukee Metal Grinding Wheel",
+                    "model": "49-94-0501",
+                    "mpn": "49-94-0501"
+                },
+                {
+                    "brand": "Dewalt",
+                    "product_name": "DEWALT Grinding Wheel",
+                    "model": "DW4514",
+                    "mpn": "DW4514"
+                }
+            ]
 
         # Dynamic titlecase brand extraction from product name/text
         brand = None
@@ -184,8 +279,9 @@ Rules:
             "mpn": mpn,
             "category": cat,
             "variant": None,
-            "identity_confidence": 0.90 if brand else 0.70,
-            "identity_status": "VERIFIED" if brand else "NEEDS_REVIEW"
+            "identity_confidence": identity_confidence if brand else 0.70,
+            "identity_status": identity_status if brand else "NEEDS_REVIEW",
+            "possible_matches": possible_matches
         }
 
     async def extract_attributes_from_document(
@@ -207,29 +303,33 @@ Document Source: {doc_source_name} ({doc_url})
 Page Number: {page_number or 1}
 Document Content:
 ---
-{doc_text[:30000]}
+{doc_text[:12000]}
 ---
 
 RULES (STRICT ANTI-HALLUCINATION POLICY):
 1. Extract ALL technical specifications explicitly supported by the text (e.g., Display, Processor, Memory, Storage, Battery, Power, Dimensions, Weight, OS, Connectivity, Performance, Materials, Operating Range, Ratings, etc.).
 2. NEVER invent missing values or make assumptions. Return NULL for missing fields.
 3. Preserve the exact evidence quote from the text supporting each extracted attribute.
-4. Output a JSON list of objects:
-[
-  {{
-    "attribute_name": "Battery Capacity",
-    "category": "Power & Battery",
-    "value": "4000 mAh",
-    "evidence_snippet": "4000mAh battery rating",
-    "page_number": {page_number or 1},
-    "section": "Specifications"
-  }}
-]
+4. Output a JSON object with an "attributes" array:
+{{
+  "attributes": [
+    {{
+      "attribute_name": "Battery Capacity",
+      "category": "Power & Electrical",
+      "value": "4000 mAh",
+      "evidence_snippet": "4000mAh battery rating",
+      "page_number": {page_number or 1},
+      "section": "Specifications"
+    }}
+  ]
+}}
 """
             try:
                 res_text = await self._call_for_document_extraction(prompt)
                 parsed = self._clean_and_parse_json(res_text)
-                if isinstance(parsed, list) and len(parsed) > 0:
+                if isinstance(parsed, dict) and "attributes" in parsed and isinstance(parsed["attributes"], list):
+                    return parsed["attributes"]
+                elif isinstance(parsed, list) and len(parsed) > 0:
                     return parsed
             except Exception as e:
                 logger.warning(f"LLM call failed for attribute extraction: {e}")
@@ -387,7 +487,7 @@ Generate commerce marketing metadata for:
 Product: {brand} {pname} (Model: {model or 'N/A'})
 Specs: {specs_summary}
 
-Return strict JSON:
+Return a valid JSON object matching this structure:
 {{
   "marketing_title": "Title string",
   "short_description": "2 sentence description",

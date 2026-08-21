@@ -1,5 +1,12 @@
 import os
-import fitz  # PyMuPDF
+import socket
+import urllib.parse
+import ipaddress
+import httpx
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz  # PyMuPDF fallback
 from bs4 import BeautifulSoup
 from typing import Dict, Any, List
 
@@ -15,6 +22,43 @@ class DocumentParser:
       "metadata": {}
     }
     """
+
+    @staticmethod
+    def is_safe_url(url: str) -> bool:
+        """
+        SSRF Protection: Resolves the domain and checks if the target IP is private,
+        loopback, or link-local.
+        """
+        try:
+            parsed = urllib.parse.urlparse(url)
+            if parsed.scheme not in ["http", "https"]:
+                return False
+            host = parsed.hostname
+            if not host:
+                return False
+            ip = socket.gethostbyname(host)
+            ip_obj = ipaddress.ip_address(ip)
+            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_reserved:
+                return False
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    async def fetch_url_content(url: str) -> str:
+        """
+        Fetches the web page content from a safe URL.
+        """
+        if not DocumentParser.is_safe_url(url):
+            raise ValueError(f"SSRF Protection: URL resolves to a private or unsafe IP address: {url}")
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            return resp.text
 
     @staticmethod
     def parse_pdf(file_path: str, source_id: str = "") -> Dict[str, Any]:

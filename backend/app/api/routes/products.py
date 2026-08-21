@@ -1,6 +1,7 @@
+from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
@@ -9,6 +10,64 @@ from app.schemas.product import APIResponse, ProductSchema, ProductIdentity, Pro
 from app.services.export_service import ExportService
 
 router = APIRouter()
+
+
+@router.get("/products", response_model=APIResponse)
+async def list_products(
+    search: Optional[str] = Query(None, description="Search by brand, name, model, or MPN"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = (
+        select(Product)
+        .options(
+            selectinload(Product.attributes),
+            selectinload(Product.sources),
+            selectinload(Product.conflicts)
+        )
+        .order_by(Product.created_at.desc())
+    )
+
+    if search:
+        term = f"%{search}%"
+        stmt = stmt.where(
+            or_(
+                Product.brand.ilike(term),
+                Product.product_name.ilike(term),
+                Product.model.ilike(term),
+                Product.mpn.ilike(term),
+                Product.category.ilike(term)
+            )
+        )
+
+    stmt = stmt.limit(limit).offset(offset)
+    res = await db.execute(stmt)
+    products = res.scalars().all()
+
+    items = [
+        {
+            "id": p.id,
+            "brand": p.brand,
+            "product_name": p.product_name,
+            "model": p.model,
+            "mpn": p.mpn,
+            "sku": p.sku,
+            "category": p.category,
+            "variant": p.variant,
+            "image_url": p.image_url,
+            "identity_confidence": p.identity_confidence,
+            "identity_status": p.identity_status,
+            "attributes_count": len(p.attributes) if p.attributes else 0,
+            "sources_count": len(p.sources) if p.sources else 0,
+            "conflicts_count": len(p.conflicts) if p.conflicts else 0,
+            "created_at": p.created_at,
+            "updated_at": p.updated_at
+        }
+        for p in products
+    ]
+
+    return APIResponse(data=items)
 
 
 @router.get("/products/{product_id}", response_model=APIResponse)
@@ -38,8 +97,10 @@ async def get_product_details(product_id: str, db: AsyncSession = Depends(get_db
             "sku": product.sku,
             "category": product.category,
             "variant": product.variant,
+            "image_url": product.image_url,
             "identity_confidence": product.identity_confidence,
-            "identity_status": product.identity_status
+            "identity_status": product.identity_status,
+            "possible_matches": product.possible_matches
         },
         "attributes": [
             {
