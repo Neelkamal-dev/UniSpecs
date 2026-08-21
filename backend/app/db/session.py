@@ -14,11 +14,22 @@ elif db_url.startswith("postgres://"):
 elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+asyncpg://"):
     db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
+import logging
+import asyncio
+
+logger = logging.getLogger(__name__)
+
+connect_args = {"check_same_thread": False} if "sqlite" in db_url else {
+    "timeout": 8,
+    "command_timeout": 10
+}
+
 engine = create_async_engine(
     db_url,
     echo=False,
     future=True,
-    connect_args={"check_same_thread": False} if "sqlite" in db_url else {}
+    pool_pre_ping=True,
+    connect_args=connect_args
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -38,5 +49,27 @@ async def get_db():
             await session.close()
 
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    global engine, AsyncSessionLocal
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables initialized successfully.")
+    except Exception as e:
+        logger.warning(f"Failed to initialize primary database: {e}. Falling back to local SQLite storage...")
+        os.makedirs("./data", exist_ok=True)
+        fallback_url = "sqlite+aiosqlite:///./data/unispecs.db"
+        engine = create_async_engine(
+            fallback_url,
+            echo=False,
+            future=True,
+            connect_args={"check_same_thread": False}
+        )
+        AsyncSessionLocal = async_sessionmaker(
+            bind=engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=False
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Local SQLite database initialized as fallback.")

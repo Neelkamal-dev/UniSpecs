@@ -12,8 +12,10 @@ class ProductIdentity(BaseModel):
     sku: Optional[str] = None
     category: Optional[str] = None
     variant: Optional[str] = None
+    image_url: Optional[str] = None
     identity_confidence: float = 0.0
     identity_status: str = "UNVERIFIED"  # VERIFIED, NEEDS_REVIEW
+    possible_matches: Optional[List[Dict[str, Any]]] = None
 
 
 # --- Attribute Schema ---

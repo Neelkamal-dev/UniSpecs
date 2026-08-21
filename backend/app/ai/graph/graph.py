@@ -74,18 +74,28 @@ async def search_web_node(state: ProductState) -> ProductState:
     queries = state.get("generated_queries", [])
     search_provider = get_search_provider()
 
+    identity = state.get("product_identity", {})
+    brand = identity.get("brand")
+
     all_results = []
     seen_urls = set()
 
-    for q in queries:
+    async def _do_search(q: str):
         try:
-            res = await search_provider.search(q, max_results=3)
-            for r in res:
-                if r["url"] not in seen_urls:
-                    seen_urls.add(r["url"])
-                    all_results.append(r)
+            return await search_provider.search(q, max_results=3, brand=brand)
         except Exception as e:
             logger.warning(f"Search provider error for query '{q}': {e}")
+            return []
+
+    search_tasks = [_do_search(q) for q in queries]
+    batch_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+    for res in batch_results:
+        if isinstance(res, list):
+            for r in res:
+                if isinstance(r, dict) and r.get("url") and r["url"] not in seen_urls:
+                    seen_urls.add(r["url"])
+                    all_results.append(r)
 
     state["raw_search_results"] = all_results
     state["progress"] = 35
@@ -112,8 +122,35 @@ async def collect_documents_node(state: ProductState) -> ProductState:
     logger.info("LangGraph Node: collect_documents")
     ranked = state.get("ranked_sources", [])
     file_path = state.get("input_file_path")
+    url = state.get("input_url")
 
     documents = []
+
+    # Include user input URL if present
+    if url and url.strip():
+        import urllib.parse
+        try:
+            logger.info(f"SSRF Check & Fetching user provided URL: {url}")
+            html_content = await DocumentParser.fetch_url_content(url)
+            parsed_html = DocumentParser.parse_html(html_content, url=url, source_id="INPUT_URL")
+            domain = ""
+            try:
+                domain = urllib.parse.urlparse(url).netloc
+            except Exception:
+                pass
+            documents.append({
+                "source_id": "INPUT_URL",
+                "title": parsed_html["title"],
+                "url": url,
+                "domain": domain or "user-url.com",
+                "source_type": "MANUFACTURER_PAGE",
+                "authority_score": 0.99,
+                "content": parsed_html["text"],
+                "pages": parsed_html["pages"]
+            })
+            logger.info(f"Successfully fetched and parsed user provided URL: {url}")
+        except Exception as e:
+            logger.warning(f"Error fetching user provided URL: {e}")
 
     # Include user input text if present
     user_text = state.get("text")
@@ -170,39 +207,51 @@ async def extract_attributes_node(state: ProductState) -> ProductState:
     docs = state.get("collected_documents", [])
     extracted_by_source = []
 
-    for doc in docs:
+    async def _process_doc(doc: dict):
         doc_pages = doc.get("pages", [])
         extracted_doc_attrs = []
 
         if len(doc_pages) > 1:
-            for page in doc_pages:
-                p_num = page.get("page_number", 1)
-                p_text = page.get("text", "")
-                if p_text.strip():
-                    page_attrs = await llm_service.extract_attributes_from_document(
-                        doc_text=p_text,
-                        doc_source_name=doc.get("title", "Source"),
-                        doc_url=doc.get("url", ""),
-                        page_number=p_num
-                    )
-                    if page_attrs:
-                        extracted_doc_attrs.extend(page_attrs)
+            page_tasks = [
+                llm_service.extract_attributes_from_document(
+                    doc_text=page.get("text", ""),
+                    doc_source_name=doc.get("title", "Source"),
+                    doc_url=doc.get("url", ""),
+                    page_number=page.get("page_number", 1)
+                )
+                for page in doc_pages if page.get("text", "").strip()
+            ]
+            page_results = await asyncio.gather(*page_tasks, return_exceptions=True)
+            for pres in page_results:
+                if isinstance(pres, list):
+                    extracted_doc_attrs.extend(pres)
         else:
-            extracted_doc_attrs = await llm_service.extract_attributes_from_document(
-                doc_text=doc.get("content", ""),
-                doc_source_name=doc.get("title", "Source"),
-                doc_url=doc.get("url", ""),
-                page_number=1
-            )
+            try:
+                extracted_doc_attrs = await llm_service.extract_attributes_from_document(
+                    doc_text=doc.get("content", ""),
+                    doc_source_name=doc.get("title", "Source"),
+                    doc_url=doc.get("url", ""),
+                    page_number=1
+                )
+            except Exception as e:
+                logger.warning(f"Error extracting attributes from doc {doc.get('title')}: {e}")
 
         if extracted_doc_attrs:
-            extracted_by_source.append({
+            return {
                 "source_name": doc.get("title"),
                 "source_url": doc.get("url"),
                 "source_type": doc.get("source_type", "UNKNOWN_WEBSITE"),
                 "authority_score": doc.get("authority_score", 0.50),
                 "attributes": extracted_doc_attrs
-            })
+            }
+        return None
+
+    doc_tasks = [_process_doc(doc) for doc in docs[:4]]
+    doc_results = await asyncio.gather(*doc_tasks, return_exceptions=True)
+
+    for dres in doc_results:
+        if isinstance(dres, dict) and dres is not None:
+            extracted_by_source.append(dres)
 
     state["extracted_attributes_by_source"] = extracted_by_source
     state["progress"] = 65
@@ -282,12 +331,92 @@ async def resolve_conflicts_node(state: ProductState) -> ProductState:
 
 async def enrich_product_node(state: ProductState) -> ProductState:
     logger.info("LangGraph Node: enrich_product")
-    val_attrs = state.get("validated_attributes", [])
-    identity = state.get("product_identity", {})
+    val_attrs = state.get("validated_attributes", []) or []
+    identity = state.get("product_identity", {}) or {}
+
+    # Define core specifications and validation keywords to detect if they exist
+    core_specs = [
+        ("Battery Capacity", ["battery", "accumulator", "mah"]),
+        ("RAM Capacity", ["ram", "memory"]),
+        ("Internal Storage", ["storage", "rom", "ssd"]),
+        ("Weight", ["weight", "mass"]),
+        ("Dimensions", ["dimension", "dimensions", "size"]),
+        ("Water & Dust Resistance", ["resistance", "ip68", "ip67", "ip54", "water", "dust"])
+    ]
+    
+    existing_names_lower = {a.get("attribute_name", "").lower() for a in val_attrs}
+    
+    missing_specs = []
+    for canonical_name, keywords in core_specs:
+        is_missing = True
+        for name in existing_names_lower:
+            if any(kw in name for kw in keywords):
+                is_missing = False
+                break
+        if is_missing:
+            missing_specs.append((canonical_name, keywords))
+            
+    if missing_specs:
+        logger.info(f"Enrichment: Missing core specifications: {[n for n, _ in missing_specs]}")
+        search_provider = get_search_provider()
+        brand = identity.get("brand") or ""
+        prod_name = identity.get("product_name") or ""
+        model = identity.get("model") or ""
+
+        async def _enrich_single_spec(spec_name: str, keywords: list):
+            query = f"{brand} {prod_name} {model} {spec_name}".strip()
+            try:
+                search_results = await search_provider.search(query, max_results=2, brand=brand)
+                if search_results:
+                    combined_snippets = "\n".join([
+                        f"Source: {r.get('title')}\nURL: {r.get('url')}\nContent: {r.get('snippet')}" 
+                        for r in search_results
+                    ])
+                    extracted_attrs = await llm_service.extract_attributes_from_document(
+                        doc_text=combined_snippets,
+                        doc_source_name=f"Web Search: {spec_name}",
+                        doc_url=search_results[0].get("url") or ""
+                    )
+                    if extracted_attrs:
+                        target_attr = None
+                        for attr in extracted_attrs:
+                            attr_name_lower = attr.get("attribute_name", "").lower()
+                            if any(kw in attr_name_lower for kw in keywords):
+                                target_attr = attr
+                                break
+                        if target_attr and target_attr.get("value"):
+                            norm_val, standard_unit = NormalizationEngine.normalize_attribute(spec_name, target_attr["value"])
+                            return {
+                                "attribute_name": spec_name,
+                                "category": target_attr.get("category", "General"),
+                                "value": target_attr["value"],
+                                "normalized_value": norm_val,
+                                "unit": standard_unit,
+                                "source_name": search_results[0].get("title") or "Web Search",
+                                "source_url": search_results[0].get("url"),
+                                "source_type": search_results[0].get("source_type") or "UNKNOWN_WEBSITE",
+                                "evidence_snippet": target_attr.get("evidence_snippet") or f"Found via query: {query}",
+                                "page_number": 1,
+                                "section": "Web Research",
+                                "confidence": 0.85,
+                                "confidence_reason": f"Enriched missing core specification via targeted web research query.",
+                                "verification_status": "ENRICHED",
+                                "extraction_method": "TARGETED_RESEARCH_ENRICHMENT"
+                            }
+            except Exception as ex:
+                logger.warning(f"Failed to enrich missing spec '{spec_name}': {ex}")
+            return None
+
+        enrich_tasks = [_enrich_single_spec(sname, kws) for sname, kws in missing_specs[:3]]
+        enrich_results = await asyncio.gather(*enrich_tasks, return_exceptions=True)
+        for eres in enrich_results:
+            if isinstance(eres, dict) and eres is not None:
+                val_attrs.append(eres)
 
     # Generate optional commerce metadata (separated from technical specs)
     commerce_meta = await llm_service.generate_commerce_content(identity, val_attrs)
 
+    state["validated_attributes"] = val_attrs
     state["commerce_metadata"] = commerce_meta
     state["progress"] = 90
     state["current_node"] = "enrich_product"

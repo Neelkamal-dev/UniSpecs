@@ -1,11 +1,14 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Float, Integer, Boolean, Text, JSON, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from app.db.session import Base
 
 def generate_uuid():
     return str(uuid.uuid4())
+
+def utc_now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 class Product(Base):
     __tablename__ = "products"
@@ -18,10 +21,12 @@ class Product(Base):
     sku = Column(String, nullable=True)
     category = Column(String, nullable=True)
     variant = Column(String, nullable=True)
+    image_url = Column(String, nullable=True)
     identity_confidence = Column(Float, default=0.0)
     identity_status = Column(String, default="UNVERIFIED")  # VERIFIED, NEEDS_REVIEW
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    possible_matches = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     attributes = relationship("ProductAttribute", back_populates="product", cascade="all, delete-orphan")
     sources = relationship("Source", back_populates="product", cascade="all, delete-orphan")
@@ -49,7 +54,7 @@ class ProductAttribute(Base):
     confidence_reason = Column(Text, nullable=True)
     verification_status = Column(String, default="UNVERIFIED")  # VERIFIED, CONFLICT, AI_INFERRED, ENRICHED, NEEDS_REVIEW, UNVERIFIED
     extraction_method = Column(String, default="DIRECT_EXTRACTION")
-    last_verified_at = Column(DateTime, default=datetime.utcnow)
+    last_verified_at = Column(DateTime, default=utc_now)
 
     product = relationship("Product", back_populates="attributes")
 
@@ -66,7 +71,7 @@ class Source(Base):
     authority_score = Column(Float, default=0.5)
     is_official = Column(Boolean, default=False)
     attributes_extracted_count = Column(Integer, default=0)
-    retrieved_at = Column(DateTime, default=datetime.utcnow)
+    retrieved_at = Column(DateTime, default=utc_now)
 
     product = relationship("Product", back_populates="sources")
 
@@ -81,7 +86,7 @@ class SourceDocument(Base):
     raw_text = Column(Text, nullable=True)
     pages_count = Column(Integer, default=1)
     doc_metadata = Column(JSON, default={})
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
 
 
 class Conflict(Base):
@@ -95,7 +100,7 @@ class Conflict(Base):
     resolution_status = Column(String, default="UNRESOLVED")  # RESOLVED, UNRESOLVED, NEEDS_HUMAN_REVIEW
     resolved_value = Column(Text, nullable=True)
     resolution_reason = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
 
     product = relationship("Product", back_populates="conflicts")
 
@@ -115,7 +120,7 @@ class AnalysisJob(Base):
     message = Column(String, default="Analysis queued")
     error_message = Column(Text, nullable=True)
     result_summary = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
     completed_at = Column(DateTime, nullable=True)
 
     product = relationship("Product", back_populates="analysis_jobs")
@@ -130,6 +135,6 @@ class AnalysisEvent(Base):
     node_name = Column(String, nullable=False)
     status = Column(String, default="INFO")  # INFO, SUCCESS, WARNING, ERROR
     message = Column(Text, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=utc_now)
 
     job = relationship("AnalysisJob", back_populates="events")

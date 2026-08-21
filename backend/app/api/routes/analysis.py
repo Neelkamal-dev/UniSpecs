@@ -1,7 +1,8 @@
 import os
 import uuid
+import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,12 +40,25 @@ async def run_analysis_graph_task(job_id: str, initial_state: dict):
             job.message = "Initializing analysis pipeline..."
             await db.commit()
 
-            # Execute LangGraph steps
-            final_state = await unispecs_graph.ainvoke(initial_state)
+            # Execute LangGraph steps and update real-time progress in DB
+            final_state = dict(initial_state)
+            async for step_output in unispecs_graph.astream(initial_state):
+                for node_name, node_state in step_output.items():
+                    if isinstance(node_state, dict):
+                        final_state.update(node_state)
+                        # Refresh job record and update progress
+                        stmt_job = select(AnalysisJob).where(AnalysisJob.id == job_id)
+                        res_job = await db.execute(stmt_job)
+                        current_job = res_job.scalar_one_or_none()
+                        if current_job:
+                            current_job.current_node = node_name
+                            current_job.progress = node_state.get("progress", current_job.progress)
+                            current_job.message = node_state.get("status_message", f"Completed stage: {node_name}")
+                            await db.commit()
 
             # Persist completed product intelligence in DB
             product_id = str(uuid.uuid4())
-            identity = final_state.get("product_identity", {})
+            identity = final_state.get("product_identity", {}) or {}
 
             product = Product(
                 id=product_id,
@@ -54,8 +68,10 @@ async def run_analysis_graph_task(job_id: str, initial_state: dict):
                 mpn=identity.get("mpn"),
                 category=identity.get("category"),
                 variant=identity.get("variant"),
+                image_url=identity.get("image_url"),
                 identity_confidence=identity.get("identity_confidence", 0.90),
-                identity_status=identity.get("identity_status", "VERIFIED")
+                identity_status=identity.get("identity_status", "VERIFIED"),
+                possible_matches=identity.get("possible_matches")
             )
             db.add(product)
 
@@ -117,7 +133,7 @@ async def run_analysis_graph_task(job_id: str, initial_state: dict):
             job.current_node = "finalize_product"
             job.progress = 100
             job.message = "Analysis finished successfully."
-            job.completed_at = datetime.utcnow()
+            job.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
             job.result_summary = final_state.get("confidence_scores")
             await db.commit()
 
@@ -166,7 +182,7 @@ async def create_analysis_job(
         "query": f"{request.product_name or ''} {request.model or ''}".strip()
     }
 
-    background_tasks.add_task(run_analysis_graph_task, job_id, initial_state)
+    asyncio.create_task(run_analysis_graph_task(job_id, initial_state))
 
     return APIResponse(
         data={
@@ -217,7 +233,7 @@ async def upload_document_and_analyze(
         "query": f"{product_name or ''} {model or ''}".strip()
     }
 
-    background_tasks.add_task(run_analysis_graph_task, job_id, initial_state)
+    asyncio.create_task(run_analysis_graph_task(job_id, initial_state))
 
     return APIResponse(
         data={

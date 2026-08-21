@@ -9,7 +9,7 @@ class WebSearchProvider(ABC):
     Allows easy replacement of Tavily with SerpAPI, Bing, DuckDuckGo, etc.
     """
     @abstractmethod
-    async def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    async def search(self, query: str, max_results: int = 5, brand: str = None) -> List[Dict[str, Any]]:
         pass
 
 
@@ -21,7 +21,7 @@ class TavilySearchProvider(WebSearchProvider):
         self.api_key = api_key
         self.endpoint = "https://api.tavily.com/search"
 
-    async def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    async def search(self, query: str, max_results: int = 5, brand: str = None) -> List[Dict[str, Any]]:
         if not self.api_key:
             raise ValueError("TAVILY_API_KEY is missing.")
 
@@ -49,14 +49,18 @@ class TavilySearchProvider(WebSearchProvider):
                     "url": url,
                     "snippet": item.get("content", ""),
                     "domain": domain,
-                    "source_type": self._classify_domain(domain),
-                    "authority_score": self._score_authority(domain)
+                    "source_type": self._classify_domain(domain, brand),
+                    "authority_score": self._score_authority(domain, brand)
                 })
 
             return results
 
-    def _classify_domain(self, domain: str) -> str:
+    def _classify_domain(self, domain: str, brand: str = None) -> str:
         d = domain.lower()
+        if brand:
+            b_clean = brand.lower().replace(" ", "").replace("-", "")
+            if len(b_clean) >= 2 and b_clean in d:
+                return "MANUFACTURER_PAGE"
         if any(kw in d for kw in ["samsung.com", "apple.com", "sony.com", "dell.com", "hp.com", "lenovo.com", "asus.com"]):
             return "MANUFACTURER_PAGE"
         elif any(kw in d for kw in ["pdf", "spec", "manual", "datasheet"]):
@@ -67,8 +71,8 @@ class TavilySearchProvider(WebSearchProvider):
             return "REPUTABLE_DATABASE"
         return "UNKNOWN_WEBSITE"
 
-    def _score_authority(self, domain: str) -> float:
-        stype = self._classify_domain(domain)
+    def _score_authority(self, domain: str, brand: str = None) -> float:
+        stype = self._classify_domain(domain, brand)
         return settings.AUTHORITY_SCORES.get(stype, 0.50)
 
 
@@ -78,7 +82,7 @@ class FallbackSearchProvider(WebSearchProvider):
     Performs live open web search across public technical search engines for ANY product,
     requiring zero hardcoded product branches.
     """
-    async def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    async def search(self, query: str, max_results: int = 5, brand: str = None) -> List[Dict[str, Any]]:
         import urllib.parse
         from bs4 import BeautifulSoup
 
@@ -117,8 +121,8 @@ class FallbackSearchProvider(WebSearchProvider):
                                     "url": actual_url,
                                     "snippet": s_text,
                                     "domain": domain or "web-discovery.org",
-                                    "source_type": self._classify_domain(domain),
-                                    "authority_score": self._score_authority(domain)
+                                    "source_type": self._classify_domain(domain, brand),
+                                    "authority_score": self._score_authority(domain, brand)
                                 })
                                 if len(results) >= max_results:
                                     break
@@ -131,7 +135,7 @@ class FallbackSearchProvider(WebSearchProvider):
 
         # Product-agnostic, brand-neutral dynamic fallback with key-value spec templates
         slug = clean_q.replace(' ', '-').lower()
-        brand_guess = clean_q.split()[0].capitalize() if clean_q else "Verified"
+        brand_guess = brand or (clean_q.split()[0].capitalize() if clean_q else "Verified")
         return [
             {
                 "title": f"Technical Datasheet & Specifications for {clean_q}",
@@ -151,8 +155,12 @@ class FallbackSearchProvider(WebSearchProvider):
             }
         ][:max_results]
 
-    def _classify_domain(self, domain: str) -> str:
+    def _classify_domain(self, domain: str, brand: str = None) -> str:
         d = domain.lower()
+        if brand:
+            b_clean = brand.lower().replace(" ", "").replace("-", "")
+            if len(b_clean) >= 2 and b_clean in d:
+                return "MANUFACTURER_PAGE"
         if any(kw in d for kw in ["official", "specs", "manual", "datasheet", "com", "org"]):
             return "MANUFACTURER_PAGE"
         elif "pdf" in d:
@@ -163,8 +171,8 @@ class FallbackSearchProvider(WebSearchProvider):
             return "REPUTABLE_DATABASE"
         return "UNKNOWN_WEBSITE"
 
-    def _score_authority(self, domain: str) -> float:
-        stype = self._classify_domain(domain)
+    def _score_authority(self, domain: str, brand: str = None) -> float:
+        stype = self._classify_domain(domain, brand)
         return settings.AUTHORITY_SCORES.get(stype, 0.50)
 
 

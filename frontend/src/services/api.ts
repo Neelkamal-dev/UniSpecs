@@ -74,11 +74,12 @@ export const api = {
       }
     }
 
-    const blob = new Blob([response.data], { type: response.headers['content-type'] });
+    const contentType = response.headers['content-type'];
+    const blob = new Blob([response.data], { type: typeof contentType === 'string' ? contentType : undefined });
     const downloadUrl = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = downloadUrl;
-    link.setAttribute('download', filename);
+    link.setAttribute('download', filename || `export.${format === 'excel' ? 'xlsx' : format}`);
     document.body.appendChild(link);
     link.click();
     link.remove();
